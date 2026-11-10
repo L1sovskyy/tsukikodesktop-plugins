@@ -1,0 +1,40 @@
+__id__ = "android_demo"
+__name__ = "Android demo"
+__description__ = "Android-style plugin running on desktop: menu items, Toast, MessagesController."
+__author__ = "@tsukikogram"
+__version__ = "1.0"
+
+from base_plugin import BasePlugin, MenuItemData, MenuItemType
+from android_utils import copy_to_clipboard
+from client_utils import get_messages_controller
+from org.telegram.messenger import ApplicationLoader, AndroidUtilities
+from android.widget import Toast
+
+
+class AndroidDemo(BasePlugin):
+    def on_plugin_load(self):
+        self.add_menu_item(MenuItemData(menu_type=MenuItemType.MESSAGE_CONTEXT_MENU, text="Copy message ID", on_click=self.copy_id))
+        self.add_menu_item(MenuItemData(menu_type=MenuItemType.CHAT_ACTION_MENU, text="Who is this?", on_click=self.who))
+        self.add_menu_item(MenuItemData(menu_type=MenuItemType.DRAWER_MENU, text="Hello from Android plugin", on_click=self.hello))
+
+    def toast(self, text):
+        Toast.makeText(ApplicationLoader.applicationContext, text, Toast.LENGTH_SHORT).show()
+
+    def copy_id(self, context):
+        message = context["message"]
+        copy_to_clipboard(str(message.getId()))
+        self.toast("Message ID %d copied" % message.getId())
+
+    def who(self, context):
+        dialog_id = context["dialog_id"]
+        controller = get_messages_controller(context["account"])
+        if dialog_id > 0:
+            user = controller.getUser(dialog_id)
+            name = "%s (@%s)" % (user.first_name, user.username) if user else "unknown user"
+        else:
+            chat = controller.getChat(-dialog_id)
+            name = chat.title if chat else "unknown chat"
+        self.toast("%s, id %d" % (name, dialog_id))
+
+    def hello(self, context):
+        AndroidUtilities.runOnUIThread(lambda: self.toast("Android plugin API works on desktop"))

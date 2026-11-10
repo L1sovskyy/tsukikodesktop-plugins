@@ -1,0 +1,668 @@
+__id__ = "femboys_music_stats_desktop"
+__name__ = "Femboy Music Stats Desktop"
+__description__ = "Статистика прослушивания музыки в Telegram: графики с детализацией, статистика трека, текст песни (LRCLIB). Разбор столбцов по трекам, топ исполнителей, команды .music, .lyrics, .track. Версия для Tsukiko Desktop: страницы открываются в браузере."
+__author__ = "@PA3MA3AH"
+__version__ = "2.6.1-desktop"
+__category__ = ["media", "tools", "fun"]
+
+import html
+import json
+import os
+import re
+import sqlite3
+import threading
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+
+from base_plugin import BasePlugin, HookResult, HookStrategy, MenuItemData, MenuItemType
+from android_utils import log, open_url
+from client_utils import get_now_playing
+from file_utils import get_files_dir
+from ui.alert import AlertDialogBuilder
+from ui.bulletin import BulletinHelper
+from ui.settings import Header, Switch, Divider, Text
+
+# ───────────────────────── Утилиты ─────────────────────────
+
+MONTHS = ["янв", "фев", "мар", "апр", "май", "июн", "июл", "авг", "сен", "окт", "ноя", "дек"]
+MONTHS_FULL = ["Январь", "Февраль", "Март", "Апрель", "Май", "Июнь", "Июль", "Август",
+               "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"]
+WDAYS = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+WDAYS_PLURAL = ["Понедельники", "Вторники", "Среды", "Четверги", "Пятницы", "Субботы", "Воскресенья"]
+
+UNKNOWN_ARTIST = "Неизвестный исполнитель"
+UNKNOWN_TITLE = "Без названия"
+USER_AGENT = "MusicStatsPlugin/2.6 (exteraGram plugin by PA3MA3AH; Tsukiko Desktop)"
+
+
+def fmt_smart(s):
+    """< 1 часа -> минуты, >= 24 часов -> дни, иначе часы и минуты."""
+    if s >= 86400:
+        return ("%.1f" % (s / 86400.0)).replace(".", ",") + " дн"
+    if s >= 3600:
+        h, m = divmod(int(s) // 60, 60)
+        return "%dч %02dм" % (h, m)
+    if s < 30:
+        return "<1 мин"
+    return "%d мин" % min(59, max(1, int(round(s / 60.0))))
+
+
+def fmt_hms(s):
+    s = int(s)
+    h, rem = divmod(s, 3600)
+    m, sec = divmod(rem, 60)
+    if h:
+        return "%dч %02dм %02dс" % (h, m, sec)
+    if m:
+        return "%dм %02dс" % (m, sec)
+    return "%dс" % sec
+
+
+def fmt_date(ts):
+    return time.strftime("%d.%m.%Y", time.localtime(ts))
+
+
+def day_label(ts):
+    lt = time.localtime(ts)
+    return "%d %s" % (lt.tm_mday, MONTHS[lt.tm_mon - 1])
+
+
+def toast(text):
+    BulletinHelper.show_info(str(text)[:300])
+
+
+def track_from_player(info):
+    """(artist, title, duration) of the track in the Telegram player."""
+    title = str(info.get("title") or "").strip()
+    artist = str(info.get("performer") or "").strip()
+    if not title:
+        name = os.path.splitext(str(info.get("file_name") or ""))[0].strip()
+        if " - " in name and not artist:
+            artist, title = [part.strip() for part in name.split(" - ", 1)]
+        else:
+            title = name
+    return artist or UNKNOWN_ARTIST, title or UNKNOWN_TITLE, int(info.get("duration") or 0)
+
+
+# ───────────────────────── Тексты песен (LRCLIB) ─────────────────────────
+
+LRCLIB = "https://lrclib.net/api"
+_LRC_TS = re.compile(r"\[(\d{1,3}):(\d{2}(?:[.:]\d{1,3})?)\]")
+
+
+def _http_json(url, timeout=10):
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read().decode("utf-8"))
+
+
+def parse_lrc(text):
+    out = []
+    for raw in text.splitlines():
+        stamps = _LRC_TS.findall(raw)
+        if not stamps:
+            continue
+        line = _LRC_TS.sub("", raw).strip() or "♪"
+        for mm, ss in stamps:
+            out.append((int(mm) * 60 + float(ss.replace(":", ".")), line))
+    out.sort(key=lambda x: x[0])
+    return out
+
+
+def _pick_lyrics(results, duration):
+    results = [r for r in (results or []) if r.get("syncedLyrics") or r.get("plainLyrics")]
+    if not results:
+        return None
+
+    def score(r):
+        synced = 0 if r.get("syncedLyrics") else 1
+        dd = abs((r.get("duration") or 0) - duration) if duration else 0
+        return (synced, dd)
+
+    return min(results, key=score)
+
+
+def fetch_lyrics(artist, title, duration):
+    unknown = artist.startswith("Неизвестн")
+    attempts = []
+    params = {"track_name": title}
+    if not unknown:
+        params["artist_name"] = artist
+    attempts.append(params)
+    attempts.append({"q": title if unknown else "%s %s" % (artist, title)})
+    item = None
+    for prm in attempts:
+        try:
+            res = _http_json(LRCLIB + "/search?" + urllib.parse.urlencode(prm))
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                continue
+            raise
+        item = _pick_lyrics(res, duration)
+        if item:
+            break
+    if not item:
+        return {"status": "none", "lines": [], "plain": None}
+    lines = parse_lrc(item["syncedLyrics"]) if item.get("syncedLyrics") else []
+    plain = item.get("plainLyrics") or None
+    if not lines and not plain:
+        return {"status": "none", "lines": [], "plain": None}
+    return {"status": "ok", "lines": lines, "plain": plain}
+
+
+def fetch_artwork(artist, title):
+    """URL обложки из iTunes Search или None."""
+    term = title if artist.startswith("Неизвестн") else "%s %s" % (artist, title)
+    try:
+        data = _http_json("https://itunes.apple.com/search?" + urllib.parse.urlencode(
+            {"term": term, "entity": "song", "limit": 1}), timeout=6)
+        results = data.get("results") or []
+        if results and results[0].get("artworkUrl100"):
+            return results[0]["artworkUrl100"].replace("100x100", "600x600")
+    except Exception as e:
+        log("artwork error: %r" % (e,))
+    return None
+
+
+# ───────────────────────── Хранилище ─────────────────────────
+
+class Store:
+    def __init__(self, path):
+        self.lock = threading.Lock()
+        self.pending = {}
+        self.db = sqlite3.connect(path, check_same_thread=False)
+        self.db.execute(
+            "CREATE TABLE IF NOT EXISTS listens("
+            "ts INTEGER NOT NULL, artist TEXT NOT NULL, title TEXT NOT NULL, "
+            "secs REAL NOT NULL, PRIMARY KEY(ts, artist, title))"
+        )
+        self.db.execute("CREATE INDEX IF NOT EXISTS idx_listens_ts ON listens(ts)")
+        self.db.execute(
+            "CREATE TABLE IF NOT EXISTS tracks("
+            "artist TEXT NOT NULL, title TEXT NOT NULL, duration INTEGER NOT NULL, "
+            "PRIMARY KEY(artist, title))"
+        )
+        self.db.commit()
+
+    def add(self, ts, artist, title, secs):
+        with self.lock:
+            key = (ts, artist, title)
+            self.pending[key] = self.pending.get(key, 0.0) + secs
+
+    def set_duration(self, artist, title, dur):
+        with self.lock:
+            self.db.execute(
+                "INSERT INTO tracks(artist, title, duration) VALUES(?,?,?) "
+                "ON CONFLICT(artist, title) DO UPDATE SET duration = excluded.duration",
+                (artist, title, int(dur)),
+            )
+            self.db.commit()
+
+    def flush(self):
+        with self.lock:
+            self._flush_locked()
+
+    def _flush_locked(self):
+        if not self.pending:
+            return
+        items = list(self.pending.items())
+        self.pending.clear()
+        try:
+            self.db.executemany(
+                "INSERT INTO listens(ts, artist, title, secs) VALUES(?,?,?,?) "
+                "ON CONFLICT(ts, artist, title) DO UPDATE SET secs = secs + excluded.secs",
+                [(k[0], k[1], k[2], v) for k, v in items],
+            )
+            self.db.commit()
+        except Exception as e:
+            log("flush error: %r" % (e,))
+            for k, v in items:
+                self.pending[k] = self.pending.get(k, 0.0) + v
+
+    def reset(self):
+        with self.lock:
+            self.pending.clear()
+            self.db.execute("DELETE FROM listens")
+            self.db.commit()
+
+    def snapshot(self):
+        now = int(time.time())
+        with self.lock:
+            self._flush_locked()
+            q = self.db.execute
+            lt = time.localtime(now)
+            midnight = int(time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 0, 0, 0, 0, 0, -1)))
+
+            def total_since(ts):
+                return q("SELECT COALESCE(SUM(secs), 0) FROM listens WHERE ts >= ?", (ts,)).fetchone()[0]
+
+            return {
+                "now": now,
+                "total": q("SELECT COALESCE(SUM(secs), 0) FROM listens").fetchone()[0],
+                "today": total_since(midnight),
+                "week": total_since(now - 7 * 86400),
+                "month": total_since(now - 30 * 86400),
+                "tracks": q("SELECT COUNT(*) FROM (SELECT 1 FROM listens GROUP BY artist, title)").fetchone()[0],
+                "hourly": q("SELECT (ts / 3600) * 3600 AS h, SUM(secs) FROM listens GROUP BY h").fetchall(),
+                "top_tracks": q(
+                    "SELECT artist, title, SUM(secs) AS s FROM listens "
+                    "GROUP BY artist, title ORDER BY s DESC LIMIT 20"
+                ).fetchall(),
+                "top_artists": q(
+                    "SELECT artist, SUM(secs) AS s FROM listens "
+                    "GROUP BY artist ORDER BY s DESC LIMIT 12"
+                ).fetchall(),
+            }
+
+    def tracks_for_bucket(self, bucket):
+        with self.lock:
+            self._flush_locked()
+            q = self.db.execute
+            if bucket["kind"] == "range":
+                return q(
+                    "SELECT artist, title, SUM(secs) AS s FROM listens "
+                    "WHERE ts >= ? AND ts < ? GROUP BY artist, title ORDER BY s DESC",
+                    (bucket["t0"], bucket["t1"]),
+                ).fetchall()
+            rows = q(
+                "SELECT (ts / 3600) * 3600 AS h, artist, title, SUM(secs) FROM listens "
+                "GROUP BY h, artist, title"
+            ).fetchall()
+        agg = {}
+        for h, artist, title, secs in rows:
+            if time.localtime(h).tm_wday == bucket["wday"]:
+                agg[(artist, title)] = agg.get((artist, title), 0.0) + secs
+        out = [(a, t, s) for (a, t), s in agg.items()]
+        out.sort(key=lambda r: -r[2])
+        return out
+
+    def tracks_for_artist(self, artist):
+        with self.lock:
+            self._flush_locked()
+            return self.db.execute(
+                "SELECT artist, title, SUM(secs) AS s FROM listens WHERE artist = ? "
+                "GROUP BY title ORDER BY s DESC", (artist,)
+            ).fetchall()
+
+    def track_stats(self, artist, title):
+        with self.lock:
+            self._flush_locked()
+            q = self.db.execute
+            row = q(
+                "SELECT COALESCE(SUM(secs), 0), MIN(ts), MAX(ts) FROM listens "
+                "WHERE artist = ? AND title = ?", (artist, title)
+            ).fetchone()
+            hourly = q(
+                "SELECT (ts / 3600) * 3600 AS h, SUM(secs) FROM listens "
+                "WHERE artist = ? AND title = ? GROUP BY h", (artist, title)
+            ).fetchall()
+            drow = q("SELECT duration FROM tracks WHERE artist = ? AND title = ?", (artist, title)).fetchone()
+        return {"total": row[0], "first": row[1], "last": row[2], "hourly": hourly, "duration": drow[0] if drow else 0}
+
+
+# ───────────────────────── Данные для графиков ─────────────────────────
+
+def build_series(snap, mode):
+    """-> (заголовок, значения, подписи, описания столбцов)"""
+    now = time.time()
+    hourly = snap["hourly"]
+    if mode == "hour":
+        base = int(now // 3600 * 3600) - 23 * 3600
+        d = dict(hourly)
+        vals, labels, buckets = [], [], []
+        for i in range(24):
+            t0 = base + i * 3600
+            hh = time.localtime(t0).tm_hour
+            vals.append(d.get(t0, 0.0))
+            labels.append("%02d" % hh if i % 3 == 0 else "")
+            buckets.append({"kind": "range", "t0": t0, "t1": t0 + 3600,
+                            "label": "%s, %02d:00–%02d:00" % (day_label(t0), hh, (hh + 1) % 24)})
+        return "Последние 24 часа · по часам", vals, labels, buckets
+    if mode == "wday":
+        sums = [0.0] * 7
+        for h, s in hourly:
+            sums[time.localtime(h).tm_wday] += s
+        buckets = [{"kind": "wday", "wday": i, "label": WDAYS_PLURAL[i] + " · все недели"} for i in range(7)]
+        return "По дням недели · всё время", sums, list(WDAYS), buckets
+    lt = time.localtime(now)
+    y, m = lt.tm_year, lt.tm_mon
+    keys = []
+    for _ in range(12):
+        keys.append((y, m))
+        m -= 1
+        if m == 0:
+            m, y = 12, y - 1
+    keys.reverse()
+    sums = {k: 0.0 for k in keys}
+    for h, s in hourly:
+        t = time.localtime(h)
+        if (t.tm_year, t.tm_mon) in sums:
+            sums[(t.tm_year, t.tm_mon)] += s
+    buckets = []
+    for (yy, mm) in keys:
+        t0 = int(time.mktime((yy, mm, 1, 0, 0, 0, 0, 0, -1)))
+        ny, nm = (yy + 1, 1) if mm == 12 else (yy, mm + 1)
+        t1 = int(time.mktime((ny, nm, 1, 0, 0, 0, 0, 0, -1)))
+        buckets.append({"kind": "range", "t0": t0, "t1": t1, "label": "%s %d" % (MONTHS_FULL[mm - 1], yy)})
+    return "Последние 12 месяцев", [sums[k] for k in keys], [MONTHS[k[1] - 1] for k in keys], buckets
+
+
+# ───────────────────────── HTML-страницы ─────────────────────────
+
+PAGE_CSS = """
+:root{--bg:#f2f2f5;--card:#fff;--text:#111;--gray:#8a8d93;--accent:#ff486c;--accent2:#c2185b;--line:rgba(0,0,0,.08)}
+@media (prefers-color-scheme:dark){:root{--bg:#0f0f12;--card:#1b1b20;--text:#f2f2f2;--gray:#9a9aa3;--line:rgba(255,255,255,.08)}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px/1.4 "Segoe UI",system-ui,sans-serif}
+.wrap{max-width:860px;margin:0 auto;padding:24px 16px 48px}
+h1{font-size:26px;margin:0 0 4px}h2{font-size:17px;margin:0 0 12px}.sub{color:var(--gray);font-size:13px}
+.card{background:var(--card);border-radius:18px;padding:18px;margin-top:16px;box-shadow:0 1px 3px rgba(0,0,0,.06)}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}
+.num{font-size:22px;font-weight:700}.lbl{color:var(--gray);font-size:13px}
+.pills{display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap}
+.pill{border:0;border-radius:999px;padding:6px 14px;background:var(--line);color:var(--text);cursor:pointer;font:inherit}
+.pill.on{background:var(--accent);color:#fff}
+svg{width:100%;height:auto;display:block}.bar{fill:var(--accent);cursor:pointer;transition:opacity .2s}
+.bar.dim{opacity:.35}.axis{fill:var(--gray);font-size:11px}
+.row{display:flex;align-items:center;gap:12px;padding:8px 0;border-top:1px solid var(--line)}
+.row:first-child{border-top:0}.rank{width:24px;color:var(--gray);text-align:right}
+.row .main{flex:1;min-width:0}.row .t{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:600}
+.row .a{color:var(--gray);font-size:13px}.share{height:4px;border-radius:2px;background:var(--accent);margin-top:4px}
+.val{color:var(--gray);font-size:13px;white-space:nowrap}.link{cursor:pointer}.link:hover .t{color:var(--accent)}
+.now{display:flex;gap:16px;align-items:center}.cover{width:96px;height:96px;border-radius:16px;object-fit:cover;background:var(--line)}
+.empty{color:var(--gray);padding:12px 0}
+.lyr p{margin:6px 0;font-size:20px;color:var(--gray);transition:color .25s,transform .25s}
+.lyr p.cur{color:var(--text);font-weight:700;transform:scale(1.02);transform-origin:left}
+.lyr pre{white-space:pre-wrap;font:inherit;font-size:18px}
+"""
+
+CHART_JS = """
+function fmt(s){if(s>=86400)return (s/86400).toFixed(1).replace('.',',')+' дн';
+ if(s>=3600){var h=Math.floor(s/3600),m=Math.floor(s%3600/60);return h+'ч '+(m<10?'0':'')+m+'м'}
+ if(s<30)return '<1 мин';return Math.min(59,Math.max(1,Math.round(s/60)))+' мин'}
+function esc(t){return String(t).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]})}
+function rows(list,withArtist,onClick){if(!list.length)return '<div class="empty">Пока пусто</div>';
+ var max=list[0][2]||1,total=list.reduce(function(a,r){return a+r[2]},0)||1;
+ return list.map(function(r,i){return '<div class="row'+(onClick?' link':'')+'" data-i="'+i+'"><div class="rank">'+(i+1)+'</div><div class="main"><div class="t">'+esc(r[1])+'</div>'
+  +(withArtist?'<div class="a">'+esc(r[0])+'</div>':'')+'<div class="share" style="width:'+Math.max(2,r[2]/max*100)+'%"></div></div><div class="val">'+fmt(r[2])+' · '+Math.round(r[2]*100/total)+'%</div></div>'}).join('')}
+function chart(el,vals,labels,onBar){var W=800,H=240,pad=28,n=vals.length,max=Math.max.apply(null,vals.concat([1])),bw=(W-pad*2)/n;
+ var s='<svg viewBox="0 0 '+W+' '+(H+24)+'">';
+ for(var g=1;g<=3;g++){var y=H-(H-20)*g/3;s+='<line x1="'+pad+'" x2="'+(W-pad)+'" y1="'+y+'" y2="'+y+'" stroke="currentColor" stroke-opacity=".08"/><text class="axis" x="2" y="'+(y+4)+'">'+fmt(max*g/3)+'</text>'}
+ for(var i=0;i<n;i++){var h=vals[i]?Math.max(3,(H-20)*vals[i]/max):0,x=pad+i*bw+bw*0.15;
+  s+='<rect class="bar" data-i="'+i+'" x="'+x+'" y="'+(H-h)+'" width="'+bw*0.7+'" height="'+h+'" rx="4"><title>'+esc(labels.full[i])+': '+fmt(vals[i])+'</title></rect>';
+  s+='<text class="axis" text-anchor="middle" x="'+(x+bw*0.35)+'" y="'+(H+16)+'">'+esc(labels.short[i])+'</text>'}
+ el.innerHTML=s+'</svg>';
+ el.querySelectorAll('.bar').forEach(function(b){b.onclick=function(){var i=+b.dataset.i;el.querySelectorAll('.bar').forEach(function(o){o.classList.toggle('dim',o!==b)});onBar(i)}})}
+"""
+
+
+def _page(title, body, script):
+    return ("<!doctype html><html lang=\"ru\"><head><meta charset=\"utf-8\">"
+            "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+            "<title>%s</title><style>%s</style></head><body><div class=\"wrap\">%s</div>"
+            "<script>%s\n%s</script></body></html>") % (html.escape(title), PAGE_CSS, body, CHART_JS, script)
+
+
+def _json(value):
+    return json.dumps(value, ensure_ascii=False).replace("</", "<\\/")
+
+
+# ───────────────────────── Плагин ─────────────────────────
+
+class MusicStatsDesktopPlugin(BasePlugin):
+    def on_plugin_load(self):
+        base = get_files_dir()
+        os.makedirs(base, exist_ok=True)
+        self.pages_dir = os.path.join(base, "music_stats_pages")
+        os.makedirs(self.pages_dir, exist_ok=True)
+        self.store = Store(os.path.join(base, "music_stats.db"))
+        self.cur = None           # (artist, title, duration) — даже на паузе
+        self.position = 0.0
+        self.paused = False
+        self._dur_seen = {}
+        self._artwork = {}
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._loop, name="MusicStatsLoop", daemon=True)
+        self._thread.start()
+        self.add_on_send_message_hook()
+        for text, fn in (("Музыка: статистика", self.open_stats),
+                         ("Музыка: текст песни", self.open_lyrics),
+                         ("Музыка: статистика трека", self.open_current_track_stats)):
+            self.add_menu_item(MenuItemData(menu_type=MenuItemType.DRAWER_MENU, text=text,
+                                            on_click=lambda *a, f=fn, **k: f()))
+        log("music stats loaded")
+
+    def on_plugin_unload(self):
+        self._stop.set()
+        self.store.flush()
+
+    # ----- команды -----
+    def on_send_message_hook(self, account, params):
+        low = str(getattr(params, "message", "") or "").strip().lower()
+        actions = {
+            ".music": self.open_stats, ".музыка": self.open_stats,
+            ".lyrics": self.open_lyrics, ".текст": self.open_lyrics,
+            ".track": self.open_current_track_stats, ".трек": self.open_current_track_stats,
+        }
+        action = actions.get(low)
+        if action is None:
+            return HookResult()
+        action()
+        return HookResult(strategy=HookStrategy.CANCEL)
+
+    # ----- фоновый учёт -----
+    def _loop(self):
+        last = time.monotonic()
+        last_flush = last
+        while not self._stop.wait(1.0):
+            now = time.monotonic()
+            dt = min(now - last, 2.0)
+            last = now
+            try:
+                info = get_now_playing()
+                if info:
+                    artist, title, dur = track_from_player(info)
+                    self.cur = (artist, title, dur)
+                    self.position = float(info.get("position") or 0.0)
+                    self.paused = bool(info.get("paused"))
+                    if self.get_setting("enabled", True):
+                        if dur > 0 and self._dur_seen.get((artist, title)) != dur:
+                            self._dur_seen[(artist, title)] = dur
+                            self.store.set_duration(artist, title, dur)
+                        if not self.paused:
+                            self.store.add(int(time.time() // 60 * 60), artist, title, dt)
+                else:
+                    self.cur = None
+                    self.paused = False
+            except Exception as e:
+                log("tick error: %r" % (e,))
+            if now - last_flush >= 10:
+                last_flush = now
+                self.store.flush()
+        self.store.flush()
+
+    # ----- страницы -----
+    def _write_and_open(self, name, content):
+        path = os.path.join(self.pages_dir, name)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(content)
+        open_url("file:///" + path.replace("\\", "/"))
+
+    def _in_background(self, fn):
+        def work():
+            try:
+                fn()
+            except Exception as e:
+                log("music stats page error: %r" % (e,))
+                toast("MusicStats: ошибка, подробности в консоли плагинов")
+        threading.Thread(target=work, daemon=True).start()
+
+    def _cover(self, artist, title):
+        if not self.get_setting("covers", True):
+            return None
+        key = (artist, title)
+        if key not in self._artwork:
+            self._artwork[key] = fetch_artwork(artist, title)
+        return self._artwork[key]
+
+    def open_stats(self):
+        self._in_background(self._build_stats)
+
+    def _build_stats(self):
+        snap = self.store.snapshot()
+        modes = {}
+        for mode in ("hour", "wday", "month"):
+            title, vals, labels, buckets = build_series(snap, mode)
+            modes[mode] = {
+                "title": title, "vals": vals,
+                "labels": {"short": labels, "full": [b["label"] for b in buckets]},
+                "tracks": [[list(r) for r in self.store.tracks_for_bucket(b)[:15]] for b in buckets],
+            }
+        artists = {a: [list(r) for r in self.store.tracks_for_artist(a)[:15]] for a, _ in snap["top_artists"]}
+        now_html = ""
+        if self.cur:
+            artist, title, _ = self.cur
+            cover = self._cover(artist, title)
+            now_html = ('<div class="card now">%s<div><div class="lbl">%s</div><h2>%s</h2>'
+                        '<div class="sub">%s</div></div></div>') % (
+                '<img class="cover" src="%s">' % html.escape(cover) if cover else "",
+                "На паузе" if self.paused else "Сейчас играет",
+                html.escape(title), html.escape(artist))
+        cards = "".join('<div><div class="num">%s</div><div class="lbl">%s</div></div>' % (v, l) for v, l in (
+            (fmt_smart(snap["today"]), "сегодня"), (fmt_smart(snap["week"]), "за 7 дней"),
+            (fmt_smart(snap["month"]), "за 30 дней"), (fmt_smart(snap["total"]), "всего"),
+            (str(snap["tracks"]), "разных треков")))
+        body = (
+            '<h1>Статистика музыки</h1><div class="sub">Обновлено %s · Femboy Music Stats</div>%s'
+            '<div class="card"><div class="grid">%s</div></div>'
+            '<div class="card"><div class="pills" id="modes"></div><h2 id="ctitle"></h2><div id="chart"></div>'
+            '<div id="bucket" style="margin-top:12px"></div></div>'
+            '<div class="card"><h2>Топ треков</h2><div id="tracks"></div></div>'
+            '<div class="card"><h2>Топ исполнителей</h2><div id="artists"></div><div id="artist" style="margin-top:12px"></div></div>'
+        ) % (time.strftime("%d.%m.%Y %H:%M"), now_html, cards)
+        script = (
+            "var M=%s,TT=%s,TA=%s,AR=%s,names={hour:'24 часа',wday:'Дни недели',month:'12 месяцев'};"
+            "function show(m){var d=M[m];document.getElementById('ctitle').textContent=d.title;"
+            "document.querySelectorAll('.pill').forEach(function(p){p.classList.toggle('on',p.dataset.m===m)});"
+            "document.getElementById('bucket').innerHTML='<div class=\"sub\">Нажмите на столбец, чтобы увидеть треки</div>';"
+            "chart(document.getElementById('chart'),d.vals,d.labels,function(i){"
+            "document.getElementById('bucket').innerHTML='<h2>'+esc(d.labels.full[i])+'</h2>'+rows(d.tracks[i],true)})}"
+            "document.getElementById('modes').innerHTML=Object.keys(names).map(function(k){return '<button class=\"pill\" data-m=\"'+k+'\">'+names[k]+'</button>'}).join('');"
+            "document.querySelectorAll('.pill').forEach(function(p){p.onclick=function(){show(p.dataset.m)}});show('hour');"
+            "document.getElementById('tracks').innerHTML=rows(TT,true);"
+            "var al=TA.map(function(r){return [r[0],r[0],r[1]]});var ae=document.getElementById('artists');ae.innerHTML=rows(al,false,true);"
+            "ae.querySelectorAll('.row').forEach(function(r){r.onclick=function(){var a=al[+r.dataset.i][0];"
+            "document.getElementById('artist').innerHTML='<h2>'+esc(a)+'</h2>'+rows(AR[a]||[],false)}});"
+        ) % (_json(modes), _json([list(r) for r in snap["top_tracks"]]), _json([list(r) for r in snap["top_artists"]]), _json(artists))
+        self._write_and_open("stats.html", _page("Статистика музыки", body, script))
+
+    def open_current_track_stats(self):
+        if not self.cur:
+            toast("Сейчас ничего не играет")
+            return
+        artist, title, dur = self.cur
+        self.open_track_stats(artist, title, dur)
+
+    def open_track_stats(self, artist, title, duration=0):
+        self._in_background(lambda: self._build_track(artist, title, duration))
+
+    def _build_track(self, artist, title, duration):
+        ts = self.store.track_stats(artist, title)
+        dur = ts["duration"] or duration
+        hod, wd, moy = [0.0] * 24, [0.0] * 7, [0.0] * 12
+        for h, secs in ts["hourly"]:
+            lt = time.localtime(h)
+            hod[lt.tm_hour] += secs
+            wd[lt.tm_wday] += secs
+            moy[lt.tm_mon - 1] += secs
+        modes = {
+            "hour": {"title": "По времени суток · всё время", "vals": hod,
+                     "labels": {"short": ["%02d" % i if i % 3 == 0 else "" for i in range(24)],
+                                "full": ["%02d:00–%02d:00" % (i, (i + 1) % 24) for i in range(24)]}},
+            "wday": {"title": "По дням недели · всё время", "vals": wd,
+                     "labels": {"short": WDAYS, "full": WDAYS_PLURAL}},
+            "month": {"title": "По месяцам года · всё время", "vals": moy,
+                      "labels": {"short": MONTHS, "full": MONTHS_FULL}},
+        }
+        plays = (ts["total"] / dur) if dur else 0
+        facts = [(fmt_hms(ts["total"]), "всего прослушано")]
+        if dur:
+            facts.append(("%.1f" % plays, "прослушиваний (≈)"))
+            facts.append(("%d:%02d" % divmod(int(dur), 60), "длительность"))
+        if ts["first"]:
+            facts.append((fmt_date(ts["first"]), "впервые"))
+            facts.append((fmt_date(ts["last"]), "последний раз"))
+        cover = self._cover(artist, title)
+        body = (
+            '<div class="card now">%s<div><div class="lbl">Статистика трека</div><h1>%s</h1><div class="sub">%s</div></div></div>'
+            '<div class="card"><div class="grid">%s</div></div>'
+            '<div class="card"><div class="pills" id="modes"></div><h2 id="ctitle"></h2><div id="chart"></div></div>'
+        ) % ('<img class="cover" src="%s">' % html.escape(cover) if cover else "", html.escape(title), html.escape(artist),
+             "".join('<div><div class="num">%s</div><div class="lbl">%s</div></div>' % f for f in facts))
+        script = (
+            "var M=%s,names={hour:'Время суток',wday:'Дни недели',month:'Месяцы'};"
+            "function show(m){var d=M[m];document.getElementById('ctitle').textContent=d.title;"
+            "document.querySelectorAll('.pill').forEach(function(p){p.classList.toggle('on',p.dataset.m===m)});"
+            "chart(document.getElementById('chart'),d.vals,d.labels,function(){})}"
+            "document.getElementById('modes').innerHTML=Object.keys(names).map(function(k){return '<button class=\"pill\" data-m=\"'+k+'\">'+names[k]+'</button>'}).join('');"
+            "document.querySelectorAll('.pill').forEach(function(p){p.onclick=function(){show(p.dataset.m)}});show('hour');"
+        ) % _json(modes)
+        self._write_and_open("track.html", _page("%s — %s" % (artist, title), body, script))
+
+    def open_lyrics(self):
+        if not self.cur:
+            toast("Сейчас ничего не играет")
+            return
+        artist, title, dur = self.cur
+        position, paused = self.position, self.paused
+        toast("Ищу текст песни…")
+        self._in_background(lambda: self._build_lyrics(artist, title, dur, position, paused))
+
+    def _build_lyrics(self, artist, title, duration, position, paused):
+        res = fetch_lyrics(artist, title, duration)
+        if res["status"] != "ok":
+            toast("Текст песни «%s» не найден" % title)
+            return
+        cover = self._cover(artist, title)
+        head = ('<div class="card now">%s<div><div class="lbl">Текст песни · LRCLIB</div><h1>%s</h1><div class="sub">%s</div></div></div>') % (
+            '<img class="cover" src="%s">' % html.escape(cover) if cover else "", html.escape(title), html.escape(artist))
+        if res["lines"]:
+            body = head + '<div class="card lyr" id="lyr">%s</div><div class="sub">Подсветка идёт от позиции трека в момент открытия%s.</div>' % (
+                "".join('<p data-t="%.2f">%s</p>' % (t, html.escape(line)) for t, line in res["lines"]),
+                " (трек был на паузе)" if paused else "")
+            script = (
+                "var start=%.3f,opened=Date.now(),run=%s,ps=[].slice.call(document.querySelectorAll('#lyr p')),last=-1;"
+                "function tick(){var t=start+(run?(Date.now()-opened)/1000:0),i=-1;"
+                "for(var k=0;k<ps.length;k++){if(+ps[k].dataset.t<=t)i=k;else break}"
+                "if(i!==last){if(last>=0)ps[last].classList.remove('cur');if(i>=0){ps[i].classList.add('cur');"
+                "ps[i].scrollIntoView({block:'center',behavior:'smooth'})}last=i}}setInterval(tick,250);tick();"
+            ) % (position, "false" if paused else "true")
+        else:
+            body = head + '<div class="card lyr"><pre>%s</pre></div>' % html.escape(res["plain"] or "")
+            script = ""
+        self._write_and_open("lyrics.html", _page("%s — %s" % (artist, title), body, script))
+
+    # ----- настройки -----
+    def create_settings(self):
+        return [
+            Header(text="Статистика прослушивания"),
+            Switch(key="enabled", text="Вести учёт", default=True,
+                   subtext="Считается музыка из плеера Telegram, без голосовых и кружков"),
+            Switch(key="covers", text="Обложки из iTunes", default=True,
+                   subtext="Подставлять обложки треков на страницах статистики"),
+            Text(text="Открыть статистику", accent=True, on_click=lambda *a: self.open_stats()),
+            Text(text="Открыть текст песни", accent=True, on_click=lambda *a: self.open_lyrics()),
+            Text(text="Статистика текущего трека", accent=True, on_click=lambda *a: self.open_current_track_stats()),
+            Text(text="Сбросить все данные", red=True, on_click=lambda *a: self.confirm_reset()),
+            Divider(text="Команды в любом чате: .music статистика, .lyrics текст песни, .track статистика трека. "
+                         "Пункты есть и в боковом меню. Страницы открываются в браузере."),
+        ]
+
+    def confirm_reset(self):
+        builder = AlertDialogBuilder()
+        builder.set_title("Сбросить статистику")
+        builder.set_message("Удалить всю историю прослушиваний? Это нельзя отменить.")
+        builder.set_positive_button("Сбросить", lambda b, w: (self.store.reset(), toast("Статистика сброшена")))
+        builder.set_negative_button("Отмена", lambda b, w: None)
+        builder.show()

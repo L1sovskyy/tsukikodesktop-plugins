@@ -1,0 +1,103 @@
+__id__ = "profile_wallpaper_desktop"
+__name__ = "Profile Wallpaper Desktop"
+__description__ = "Свой фон для страницы вашего профиля в Tsukiko Desktop: фото, размытие, затемнение и прозрачность блоков.\nИдея оригинального плагина для Android: @JIl06uTeJIb_K0TuKoB."
+__author__ = "@tsukikogram, idea @JIl06uTeJIb_K0TuKoB"
+__version__ = "1.0.1"
+
+import os
+import shutil
+import time
+
+import desktop_decor
+from base_plugin import BasePlugin
+from desktop_decor import Decor
+from file_utils import get_files_dir
+from ui.bulletin import BulletinHelper
+from ui.settings import Divider, Header, Selector, Text
+
+PERCENTS = ["%d%%" % i for i in range(0, 101, 5)]
+BLUR_ITEMS = ["Выкл", "Слабое", "Среднее", "Сильное", "Очень сильное", "Максимум"]
+FILTER = "Изображения (*.png *.jpg *.jpeg *.bmp *.webp)"
+
+
+class ProfileWallpaperDesktop(BasePlugin):
+    def on_plugin_load(self):
+        desktop_decor.register_provider(self._decor)
+
+    def on_plugin_unload(self):
+        desktop_decor.unregister_provider(self._decor)
+
+    def _percent(self, key, default):
+        value = self.get_setting(key, default)
+        if isinstance(value, bool):
+            value = default
+        try:
+            return max(0, min(20, int(value))) * 5
+        except (TypeError, ValueError):
+            return default * 5
+
+    def _decor(self, account, dialog_id):
+        if dialog_id != desktop_decor.self_id(account):
+            return None
+        path = self.get_setting("image_path", "")
+        if not path or not os.path.exists(path):
+            return None
+        return Decor(
+            profile_wallpaper=path,
+            profile_wallpaper_blur=int(self.get_setting("blur", 0)),
+            profile_wallpaper_dim=self._percent("dim_pct", 6),
+            profile_blocks_opacity=self._percent("opacity_pct", 10),
+            in_lists=False,
+            in_messages=False,
+        )
+
+    def _changed(self, *args):
+        desktop_decor.invalidate()
+
+    def _remove_old(self, path):
+        if path and os.path.basename(path).startswith("profile_wallpaper_") and os.path.exists(path):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
+    def pick_image(self, view=None):
+        def picked(source):
+            if not source:
+                return
+            try:
+                ext = os.path.splitext(source)[1].lower() or ".jpg"
+                target = os.path.join(get_files_dir(), "profile_wallpaper_%d%s" % (int(time.time()), ext))
+                shutil.copyfile(source, target)
+            except OSError as e:
+                self.log("copy failed: %s" % e)
+                BulletinHelper.show_error("Не удалось открыть изображение")
+                return
+            old = self.get_setting("image_path", "")
+            self.set_setting("image_path", target)
+            self._remove_old(old)
+            desktop_decor.invalidate()
+            BulletinHelper.show_info("Фон выбран")
+        desktop_decor.pick_file(FILTER, picked)
+
+    def reset_image(self, view=None):
+        old = self.get_setting("image_path", "")
+        self.set_setting("image_path", "")
+        self._remove_old(old)
+        desktop_decor.invalidate()
+        BulletinHelper.show_info("Фон сброшен")
+
+    def create_settings(self):
+        has_img = bool(self.get_setting("image_path", ""))
+        return [
+            Header(text="Фон профиля"),
+            Text(text="Выбрать фото" + (" (выбрано)" if has_img else ""), accent=True, on_click=self.pick_image),
+            Text(text="Убрать фон", red=True, on_click=self.reset_image),
+            Header(text="Оформление"),
+            Selector(key="blur", text="Размытие", default=0, items=BLUR_ITEMS, on_change=self._changed),
+            Selector(key="dim_pct", text="Затемнение", default=6, items=PERCENTS, on_change=self._changed),
+            Selector(key="opacity_pct", text="Плотность блоков", default=10, items=PERCENTS, on_change=self._changed),
+            Divider(text="Плотность 0% — блоки полностью прозрачные, 100% — сплошные. "
+                         "Фон виден только в вашем профиле и только в Tsukiko, "
+                         "изменения применяются сразу."),
+        ]

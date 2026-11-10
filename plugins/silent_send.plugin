@@ -1,0 +1,28 @@
+__id__ = "silent_send"
+__name__ = "Silent sender"
+__version__ = "1.0"
+
+from base_plugin import BasePlugin, HookResult, HookStrategy
+from org.telegram.tgnet import TLRPC
+
+
+class Silent(BasePlugin):
+    def on_plugin_load(self):
+        self.add_hook("TL_messages_sendMessage")
+        self.add_hook("TL_updateNewMessage")
+        self.responses = []
+
+    def pre_request_hook(self, request_name, account, request):
+        if isinstance(request, TLRPC.TL_messages_sendMessage):
+            request.silent = True
+            return HookResult(strategy=HookStrategy.MODIFY, request=request)
+        return HookResult()
+
+    def post_request_hook(self, request_name, account, response, error):
+        self.responses.append((request_name, type(response).__name__, error))
+        return HookResult()
+
+    def on_update_hook(self, update_name, account, update):
+        if "spam" in (update.message.message or ""):
+            return HookResult(strategy=HookStrategy.CANCEL)
+        return HookResult()

@@ -1,0 +1,135 @@
+__id__ = "custom_profile_desktop"
+__name__ = "Custom Profile Desktop"
+__description__ = "Profile customization for Tsukiko Desktop: banner, avatar shape and frame, name color and glow, message bubbles and player background."
+__author__ = "@tsukikogram"
+__version__ = "1.0"
+
+from base_plugin import BasePlugin
+from ui.settings import Divider, Header, Input, Selector, Switch, Text
+from ui.bulletin import BulletinHelper
+
+import desktop_decor
+from desktop_decor import Decor
+
+PRESETS = [
+    ("Crimson Moon", {"banner_color1": "#FF486C", "banner_color2": "#3A0A18", "name_color": "#FF5C7C", "glow_color": "#FF2A55", "frame_color1": "#FF486C", "frame_color2": "#8A0F2E", "bubble_out": "#7A1730", "player1": "#FF486C", "player2": "#2A0812"}),
+    ("Ocean", {"banner_color1": "#3FA9F5", "banner_color2": "#0B2540", "name_color": "#7FD0FF", "glow_color": "#2C8FE0", "frame_color1": "#3FA9F5", "frame_color2": "#1C4E8A", "bubble_out": "#1D4F7A", "player1": "#3FA9F5", "player2": "#0B2540"}),
+    ("Neon", {"banner_color1": "#B04BFF", "banner_color2": "#140A2E", "name_color": "#E0A8FF", "glow_color": "#C04BFF", "frame_color1": "#00E5FF", "frame_color2": "#B04BFF", "bubble_out": "#4A1F7A", "player1": "#B04BFF", "player2": "#00E5FF"}),
+    ("Sakura", {"banner_color1": "#FFB7D0", "banner_color2": "#7A3355", "name_color": "#FFC6DA", "glow_color": "#FF8DB5", "frame_color1": "#FFB7D0", "frame_color2": "#FF6FA3", "bubble_out": "#7A3355", "player1": "#FFB7D0", "player2": "#7A3355"}),
+]
+
+AVATAR_RADII = [50, 30, 20, 0]
+DIMS = [0, 20, 40, 60]
+WIDTHS = [2, 3, 5]
+GLOWS = [5, 9, 14]
+
+
+class CustomProfileDesktop(BasePlugin):
+    def on_plugin_load(self):
+        if self.get_setting("first_run", True):
+            self._apply_preset(0, notify=False)
+            self.set_setting("first_run", False)
+        desktop_decor.register_provider(self._decor)
+
+    def on_plugin_unload(self):
+        desktop_decor.unregister_provider(self._decor)
+
+    def _s(self, key, default=None):
+        return self.get_setting(key, default)
+
+    def _decor(self, account, dialog_id):
+        if not self._s("enabled", True):
+            return None
+        me = desktop_decor.self_id(account)
+        if dialog_id != me:
+            if self._s("bubble_in_enabled", False):
+                return Decor(bubble=self._s("bubble_in", "#2A2F3A"), in_profile=False, in_lists=False)
+            return None
+        mode = int(self._s("banner_mode", 2))
+        banner_colors = None
+        banner_image = None
+        if mode == 1:
+            banner_colors = [self._s("banner_color1", "#FF486C")]
+        elif mode == 2:
+            banner_colors = [self._s("banner_color1", "#FF486C"), self._s("banner_color2", "#3A0A18")]
+        elif mode == 3:
+            banner_image = self._s("banner_image", "") or None
+        frame = None
+        if self._s("frame_enabled", True):
+            frame = [self._s("frame_color1", "#FF486C")]
+            if self._s("frame_gradient", True):
+                frame.append(self._s("frame_color2", "#8A0F2E"))
+        in_chats = bool(self._s("in_chats", True))
+        return Decor(
+            banner_colors=banner_colors,
+            banner_image=banner_image,
+            banner_dim=DIMS[int(self._s("banner_dim", 0))],
+            avatar_radius=AVATAR_RADII[int(self._s("avatar_shape", 0))],
+            avatar_frame=frame,
+            avatar_frame_width=WIDTHS[int(self._s("frame_width", 1))],
+            name_color=self._s("name_color", "#FF5C7C") if self._s("name_color_enabled", True) else None,
+            name_glow=self._s("glow_color", "#FF2A55") if self._s("glow_enabled", True) else None,
+            name_glow_radius=GLOWS[int(self._s("glow_size", 1))],
+            bubble=self._s("bubble_out", "#7A1730") if self._s("bubble_out_enabled", False) else None,
+            player_colors=[self._s("player1", "#FF486C"), self._s("player2", "#2A0812")] if self._s("player_enabled", True) else None,
+            in_lists=in_chats,
+            in_messages=in_chats,
+        )
+
+    def _changed(self, *args):
+        desktop_decor.invalidate()
+
+    def _apply_preset(self, index, notify=True):
+        name, values = PRESETS[int(index)]
+        for key, value in values.items():
+            self.set_setting(key, value)
+        desktop_decor.invalidate()
+        if notify:
+            BulletinHelper.show_success("Preset «%s» applied. Reopen settings to see the new colors." % name)
+
+    def _pick_banner(self, view=None):
+        def picked(path):
+            if path:
+                self.set_setting("banner_image", path)
+                self.set_setting("banner_mode", 3)
+                desktop_decor.invalidate()
+                BulletinHelper.show_success("Banner image set")
+        desktop_decor.pick_file("Images (*.png *.jpg *.jpeg *.webp *.gif)", picked)
+
+    def create_settings(self):
+        c = self._changed
+        return [
+            Switch(key="enabled", text="Custom profile", default=True, subtext="Decorations are drawn only in this app", on_change=c),
+            Selector(key="preset", text="Preset", default=0, items=[name for name, _ in PRESETS], on_change=self._apply_preset),
+            Header(text="Banner"),
+            Selector(key="banner_mode", text="Banner", default=2, items=["Off", "Color", "Gradient", "Image"], on_change=c),
+            Input(key="banner_color1", text="Main color", default="#FF486C", on_change=c),
+            Input(key="banner_color2", text="Second color", default="#3A0A18", on_change=c),
+            Text(text="Choose banner image…", on_click=self._pick_banner),
+            Selector(key="banner_dim", text="Dim banner", default=0, items=["None", "20%", "40%", "60%"], on_change=c),
+            Header(text="Avatar"),
+            Selector(key="avatar_shape", text="Avatar shape", default=0, items=["Circle", "Rounded", "Soft square", "Square"], on_change=c),
+            Switch(key="frame_enabled", text="Avatar frame", default=True, on_change=c),
+            Switch(key="frame_gradient", text="Gradient frame", default=True, on_change=c),
+            Input(key="frame_color1", text="Frame color", default="#FF486C", on_change=c),
+            Input(key="frame_color2", text="Frame second color", default="#8A0F2E", on_change=c),
+            Selector(key="frame_width", text="Frame width", default=1, items=["Thin", "Medium", "Thick"], on_change=c),
+            Header(text="Name"),
+            Switch(key="name_color_enabled", text="Name color", default=True, on_change=c),
+            Input(key="name_color", text="Color", default="#FF5C7C", on_change=c),
+            Switch(key="glow_enabled", text="Name glow", default=True, on_change=c),
+            Input(key="glow_color", text="Glow color", default="#FF2A55", on_change=c),
+            Selector(key="glow_size", text="Glow size", default=1, items=["Small", "Medium", "Large"], on_change=c),
+            Header(text="In chats and lists"),
+            Switch(key="in_chats", text="Frame and name color in chats", default=True, subtext="In the chat list and in group messages", on_change=c),
+            Header(text="Message bubbles"),
+            Switch(key="bubble_out_enabled", text="My bubbles", default=False, on_change=c),
+            Input(key="bubble_out", text="My bubble color", default="#7A1730", on_change=c),
+            Switch(key="bubble_in_enabled", text="Other people's bubbles", default=False, on_change=c),
+            Input(key="bubble_in", text="Their bubble color", default="#2A2F3A", on_change=c),
+            Header(text="Player"),
+            Switch(key="player_enabled", text="Player background", default=True, on_change=c),
+            Input(key="player1", text="Player color", default="#FF486C", on_change=c),
+            Input(key="player2", text="Player second color", default="#2A0812", on_change=c),
+            Divider(text="Colors are #RRGGBB. Everything is local: other people see your usual profile."),
+        ]

@@ -1,0 +1,136 @@
+__id__ = "ndb_desktop"
+__name__ = "NavDrawerBackground Desktop"
+__description__ = "Custom background for the account card in the side menu of Tsukiko Desktop: picture or GIF/WebP animation, dimming, faded edges.\nIdea and design of the original Android plugin: @ka1Plugins."
+__author__ = "@tsukikogram, idea @ka1Plugins"
+__version__ = "1.0"
+
+import os
+import shutil
+import time
+
+import desktop_decor
+from base_plugin import BasePlugin
+from desktop_decor import Decor
+from file_utils import get_files_dir
+from ui.bulletin import BulletinHelper
+from ui.settings import Divider, Header, Input, Selector, Switch, Text
+
+ANIMATED = (".gif", ".webp")
+FILTER = "Images and animations (*.png *.jpg *.jpeg *.bmp *.webp *.gif)"
+
+TRANSLATIONS = {
+    "ru": {
+        "lang": "Язык", "main": "Основное", "appearance": "Вид", "animation": "Анимация",
+        "choose": "Выбрать файл", "delete": "Удалить фон",
+        "dim": "Затемнение (%)", "dim_sub": "От 0 до 100",
+        "fade": "Градиент по краям", "fade_sub": "Плавный переход в фон меню",
+        "fill": "Заполнить", "fill_sub": "Обрезает края вместо полей по бокам",
+        "animate": "Анимировать GIF и WebP", "animate_sub": "Играет только пока меню открыто",
+        "about": "Видео (MP4) на компьютере не поддерживается: сохраните анимацию как GIF или WebP.",
+        "cleared": "Фон удалён", "selected": "Фон установлен", "error": "Не удалось взять файл",
+    },
+    "en": {
+        "lang": "Language", "main": "Main", "appearance": "View", "animation": "Animation",
+        "choose": "Choose file", "delete": "Delete background",
+        "dim": "Dimming (%)", "dim_sub": "From 0 to 100",
+        "fade": "Fade at edges", "fade_sub": "Smooth transition into the menu",
+        "fill": "Fill", "fill_sub": "Crops the edges instead of leaving bars",
+        "animate": "Animate GIF and WebP", "animate_sub": "Plays only while the menu is open",
+        "about": "Video (MP4) is not supported on desktop: save the animation as GIF or WebP.",
+        "cleared": "Background deleted", "selected": "Background set", "error": "Could not use the file",
+    },
+}
+
+
+class NavDrawerBackgroundDesktop(BasePlugin):
+    def on_plugin_load(self):
+        desktop_decor.register_provider(self._decor)
+
+    def on_plugin_unload(self):
+        desktop_decor.unregister_provider(self._decor)
+
+    def _t(self, key):
+        lang = "en" if int(self.get_setting("lang", 0)) == 1 else "ru"
+        return TRANSLATIONS[lang].get(key, key)
+
+    def _dim(self):
+        try:
+            return max(0, min(100, int(str(self.get_setting("dim", "20")).strip() or 0)))
+        except ValueError:
+            return 20
+
+    def _decor(self, account, dialog_id):
+        if dialog_id != desktop_decor.self_id(account):
+            return None
+        path = self.get_setting("media_path", "")
+        if not path or not os.path.exists(path):
+            return None
+        return Decor(
+            drawer_image=path,
+            drawer_dim=self._dim(),
+            drawer_fade=bool(self.get_setting("enable_fade", True)),
+            drawer_fill=bool(self.get_setting("fill_bg", True)),
+            drawer_animate=bool(self.get_setting("animate", True)),
+            in_profile=False,
+            in_lists=False,
+            in_messages=False,
+        )
+
+    def _changed(self, *args):
+        desktop_decor.invalidate()
+
+    def _remove_old(self, path):
+        if path and os.path.basename(path).startswith("ndb_bg_") and os.path.exists(path):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
+    def _pick_file(self, view=None):
+        def picked(source):
+            if not source:
+                return
+            try:
+                ext = os.path.splitext(source)[1].lower() or ".png"
+                target = os.path.join(get_files_dir(), "ndb_bg_%d%s" % (int(time.time()), ext))
+                shutil.copyfile(source, target)
+            except OSError as e:
+                self.log("copy failed: %s" % e)
+                BulletinHelper.show_error(self._t("error"))
+                return
+            old = self.get_setting("media_path", "")
+            self.set_setting("media_path", target)
+            self._remove_old(old)
+            desktop_decor.invalidate()
+            BulletinHelper.show_success(self._t("selected"))
+        desktop_decor.pick_file(FILTER, picked)
+
+    def _clear(self, view=None):
+        old = self.get_setting("media_path", "")
+        self.set_setting("media_path", "")
+        self._remove_old(old)
+        desktop_decor.invalidate()
+        BulletinHelper.show_info(self._t("cleared"))
+
+    def create_settings(self):
+        path = self.get_setting("media_path", "")
+        items = [
+            Selector(key="lang", text=self._t("lang"), default=0, items=["Русский", "English"]),
+            Divider(),
+            Header(text=self._t("main")),
+            Text(text=self._t("choose"), on_click=self._pick_file),
+        ]
+        if path:
+            items.append(Text(text=self._t("delete"), red=True, on_click=self._clear))
+        items += [
+            Divider(),
+            Header(text=self._t("appearance")),
+            Input(key="dim", text=self._t("dim"), default="20", subtext=self._t("dim_sub"), on_change=self._changed),
+            Switch(key="enable_fade", text=self._t("fade"), default=True, subtext=self._t("fade_sub"), on_change=self._changed),
+            Switch(key="fill_bg", text=self._t("fill"), default=True, subtext=self._t("fill_sub"), on_change=self._changed),
+            Divider(),
+            Header(text=self._t("animation")),
+            Switch(key="animate", text=self._t("animate"), default=True, subtext=self._t("animate_sub"), on_change=self._changed),
+            Divider(text=self._t("about")),
+        ]
+        return items

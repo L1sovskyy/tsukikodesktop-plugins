@@ -1,0 +1,48 @@
+__id__ = "calc_cmd"
+__name__ = "Calc"
+__description__ = "Evaluates .calc expressions"
+__author__ = "@test"
+__version__ = "1.2"
+__min_version__ = "11.12.0"
+
+from base_plugin import BasePlugin, HookResult, HookStrategy
+from ui.settings import Header, Switch, Input, Selector, Text, Divider
+from ui.bulletin import BulletinHelper
+from markdown_utils import parse_markdown
+from android_utils import log
+from java.util import ArrayList
+
+
+class CalcPlugin(BasePlugin):
+    def on_plugin_load(self):
+        self.add_on_send_message_hook()
+        log("calc loaded")
+
+    def create_settings(self):
+        return [
+            Header(text="Calc"),
+            Switch(key="bold", text="Bold result", default=True, on_change=self._changed),
+            Input(key="prefix", text="Prefix", default=".calc"),
+            Selector(key="mode", text="Mode", default=0, items=["int", "float"]),
+            Divider(text="About"),
+            Text(text="More", create_sub_fragment=lambda: [Header(text="Nested")]),
+        ]
+
+    def _changed(self, value):
+        BulletinHelper.show_info("bold=%s" % value)
+
+    def on_send_message_hook(self, account, params):
+        prefix = self.get_setting("prefix", ".calc") + " "
+        if not params.message.startswith(prefix):
+            return HookResult()
+        expr = params.message[len(prefix):]
+        value = eval(expr, {"__builtins__": {}})
+        if self.get_setting("bold", True):
+            parsed = parse_markdown("%s = **%s**" % (expr, value))
+            params.message = parsed.text
+            params.entities = ArrayList()
+            for e in parsed.entities:
+                params.entities.add(e.to_tlrpc_object())
+        else:
+            params.message = "%s = %s" % (expr, value)
+        return HookResult(strategy=HookStrategy.MODIFY, params=params)

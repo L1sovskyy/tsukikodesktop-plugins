@@ -1,0 +1,437 @@
+import json
+import random
+import traceback
+
+from base_plugin import BasePlugin, HookResult, HookStrategy
+from ui.settings import Header, Input, Switch, Divider, Text
+from client_utils import get_user_config, send_message, get_messages_controller, send_request
+from android_utils import run_on_ui_thread, log
+from markdown_utils import parse_markdown
+from org.telegram.tgnet import TLRPC
+
+__id__ = "roleplay_plugin_desktop"
+__name__ = "RolePlay Commands Desktop"
+__version__ = "1.4-desktop"
+__author__ = "@windukk and @shakyyra"
+__description__ = "Плагин для ролевых команд. Больше информации в настройках. Версия для Tsukiko Desktop."
+__icon__ = "Pguliptpvrbeng/1"
+__category__ = ["fun"]
+
+KEY_WHITELIST_ENABLED = "whitelist_enabled"
+KEY_WHITELIST_CHATS = "whitelist_chats"
+KEY_RP_COMMANDS = "rp_commands"
+KEY_RP_NAMES = "rp_names"
+KEY_ALLOW_EVERYONE = "allow_everyone"
+KEY_PLAIN_ENABLED = "plain_enabled"
+KEY_EMOJI_ENABLED = "emoji_enabled"
+KEY_EMOJI_LIST = "emoji_list"
+
+BOT_API_CHANNEL_SHIFT = 1000000000000
+SELF_TARGET = "себя"
+
+
+class RolePlayDesktopPlugin(BasePlugin):
+
+    def on_plugin_load(self):
+        if self.get_setting(KEY_RP_COMMANDS) is None:
+            self.set_setting(KEY_RP_COMMANDS, json.dumps({}))
+        if self.get_setting(KEY_RP_NAMES) is None:
+            self.set_setting(KEY_RP_NAMES, json.dumps({}))
+        self._seen = set()
+        self._names_cache = {}
+
+        self.add_on_send_message_hook()
+        # Commands typed by other people (or by you on another device).
+        self.add_hook("NewMessage", match_substring=True)
+        self.add_hook("NewChannelMessage", match_substring=True)
+        self.add_hook("ShortMessage", match_substring=True)
+        self.add_hook("ShortChatMessage", match_substring=True)
+        self.log("RolePlay Commands Desktop loaded")
+
+    def create_settings(self):
+        return [
+            Header(text="Ролевые команды"),
+            Divider(),
+            Header(text="Доступ"),
+            Switch(
+                key=KEY_ALLOW_EVERYONE,
+                text="Разрешить всем использовать RP-команды",
+                icon="msg_users",
+                default=False,
+                subtext="Если выключено — использовать сможете только вы",
+            ),
+            Switch(
+                key=KEY_PLAIN_ENABLED,
+                text="Триггеры без точки",
+                icon="msg_filter",
+                default=False,
+                subtext="Позволяет вызывать триггеры без символа '.' в начале",
+            ),
+            Switch(
+                key=KEY_EMOJI_ENABLED,
+                text="Случайная эмодзи перед сообщением",
+                icon="msg_emoji",
+                default=False,
+                subtext="Добавлять случайную эмодзи из списка ниже",
+            ),
+            Input(
+                key=KEY_EMOJI_LIST,
+                text="Список эмодзи (через пробел)",
+                icon="msg_emoji",
+                default="",
+                subtext="Перечислите несколько эмодзи через пробел, например: 😊 😂 💋",
+            ),
+            Divider(),
+            Header(text="Белый список чатов"),
+            Switch(
+                key=KEY_WHITELIST_ENABLED,
+                text="Включить ограничение по чатам",
+                icon="msg_filter",
+                default=False,
+                subtext="Команды работают только в указанных ниже чатах",
+            ),
+            Input(
+                key=KEY_WHITELIST_CHATS,
+                text="ID разрешённых чатов",
+                icon="msg_link",
+                default="",
+                subtext="Перечислите ID через запятую (для групп с тире)",
+            ),
+            Divider(),
+            Header(text="Доступные команды:"),
+            Text(text=".rpadd [действие] [ответ] — добавить триггер", icon="msg_bot"),
+            Text(text=".rpdel [действие] — удалить триггер", icon="msg_bot"),
+            Text(text=".rpname [имя] — задать своё RP-имя", icon="msg_bot"),
+            Text(text=".rpname remove — сбросить RP-имя", icon="msg_bot"),
+            Text(text=".rplist — список триггеров", icon="msg_bot"),
+            Text(text="Использование: .rpadd [команда] [действие]"),
+            Text(text="Пример: .rpadd ноль {user} нулит {target}"),
+            Text(text="{user} — автор {target} — цель."),
+        ]
+
+    # ------------------------------------------------------------- own messages
+
+    def on_send_message_hook(self, account, params):
+        try:
+            text = getattr(params, "message", None)
+            if not isinstance(text, str):
+                return HookResult()
+            message_text = text.strip()
+            parts = message_text.split()
+            if not parts:
+                return HookResult()
+
+            commands = self._commands()
+            first_word = parts[0].lower()
+            is_plain_trigger = self.get_setting(KEY_PLAIN_ENABLED, False) and first_word in commands
+            if not message_text.startswith(".") and not is_plain_trigger:
+                return HookResult()
+
+            chat_id = int(params.peer)
+            if not self._is_chat_allowed(chat_id):
+                return HookResult()
+            owner_id = self._owner_id(account)
+            command = first_word if message_text.startswith(".") else "." + first_word
+
+            if command in (".rpadd", ".rpdel", ".rpname", ".rplist"):
+                self._admin_command(account, chat_id, owner_id, command, parts)
+                return HookResult(strategy=HookStrategy.CANCEL)
+
+            rp_command = command[1:]
+            if rp_command not in commands:
+                return HookResult()
+
+            user_name = self._display_name(account, owner_id)
+            reply = getattr(params, "replyToMsg", None)
+            reply_id = int(reply.getId()) if reply is not None else 0
+            if reply_id:
+                # The author of the replied message is not known locally on
+                # desktop: ask the server, then send the reply ourselves.
+                def send_with_target(target_name):
+                    self._send_md(account, chat_id, self._render(commands[rp_command], user_name, target_name), reply_id)
+
+                self._resolve_reply_target(account, chat_id, reply_id, send_with_target)
+                return HookResult(strategy=HookStrategy.CANCEL)
+
+            target_name = " ".join(parts[1:]) if len(parts) > 1 else SELF_TARGET
+            parsed = parse_markdown(self._render(commands[rp_command], user_name, target_name))
+            params.message = parsed.text
+            params.entities = [entity.to_tlrpc_object() for entity in parsed.entities]
+            return HookResult(strategy=HookStrategy.MODIFY, params=params)
+        except Exception:
+            self.log("RolePlay send hook error: " + traceback.format_exc())
+            return HookResult()
+
+    def _admin_command(self, account, chat_id, sender_id, command, parts):
+        owner = self._is_owner(account, sender_id)
+        if command == ".rpadd":
+            if not owner:
+                self._send_md(account, chat_id, "🚫 Вы не являетесь владельцем плагина.")
+            elif len(parts) < 3:
+                self._send_md(account, chat_id, "ℹ️ Использование: .rpadd [действие] [ответ]\n\nПример: .rpadd ноль {user} нулит {target}")
+            else:
+                action = parts[1].lower()
+                commands = self._commands()
+                commands[action] = " ".join(parts[2:])
+                self.set_setting(KEY_RP_COMMANDS, json.dumps(commands, ensure_ascii=False))
+                self._send_md(account, chat_id, "✅ *Триггер* `%s` *добавлен*." % action)
+        elif command == ".rpdel":
+            if not owner:
+                self._send_md(account, chat_id, "🚫 Вы не являетесь владельцем плагина.")
+            elif len(parts) < 2:
+                self._send_md(account, chat_id, "ℹ️ Использование: .rpdel [действие]")
+            else:
+                action = parts[1].lower()
+                commands = self._commands()
+                if action in commands:
+                    del commands[action]
+                    self.set_setting(KEY_RP_COMMANDS, json.dumps(commands, ensure_ascii=False))
+                    self._send_md(account, chat_id, "🗑️ *Триггер* `%s` *удалён*." % action)
+                else:
+                    self._send_md(account, chat_id, "❌ Триггер '%s' не найден." % action)
+        elif command == ".rpname":
+            if len(parts) < 2:
+                return
+            names = self._names()
+            if parts[1].lower() == "remove":
+                if names.pop(str(sender_id), None) is not None:
+                    self.set_setting(KEY_RP_NAMES, json.dumps(names, ensure_ascii=False))
+                    self._send_md(account, chat_id, "♻️ Имя сброшено.")
+                else:
+                    self._send_md(account, chat_id, "⚠️ У вас нет RP-имени.")
+            else:
+                name = " ".join(parts[1:])
+                names[str(sender_id)] = name
+                self.set_setting(KEY_RP_NAMES, json.dumps(names, ensure_ascii=False))
+                self._send_md(account, chat_id, "👤 Теперь твоё RP-имя: *%s*" % name)
+        elif command == ".rplist":
+            commands = self._commands()
+            if not commands:
+                self._send_md(account, chat_id, "📂 Список триггеров пуст.")
+            else:
+                self._send_md(account, chat_id, "*Триггеры:*\n" + "\n".join("• `%s`" % key for key in commands))
+
+    # ---------------------------------------------------------- others' messages
+
+    def on_update_hook(self, update_name, account, update) -> HookResult:
+        run_on_ui_thread(lambda: self._process_update(account, update))
+        return HookResult()
+
+    def on_updates_hook(self, container_name, account, updates) -> HookResult:
+        run_on_ui_thread(lambda: self._process_update(account, updates))
+        return HookResult()
+
+    def _extract_message(self, account, update):
+        """(text, chat_id, sender_id, message_id, reply_id) or None."""
+        my_id = self._owner_id(account)
+        message = getattr(update, "message", None)
+        if isinstance(message, str):
+            name = type(update).__name__
+            if name == "TL_updateShortMessage":
+                chat_id = int(update.user_id)
+                sender_id = my_id if getattr(update, "out", False) else int(update.user_id)
+            elif name == "TL_updateShortChatMessage":
+                chat_id = -int(update.chat_id)
+                sender_id = int(update.from_id)
+            else:
+                return None
+            return message, chat_id, sender_id, int(update.id), self._reply_id(update)
+        if message is None or not isinstance(getattr(message, "message", None), str):
+            return None
+        peer = getattr(message, "peer_id", None)
+        if isinstance(peer, TLRPC.TL_peerUser):
+            chat_id = int(peer.user_id)
+        elif isinstance(peer, TLRPC.TL_peerChat):
+            chat_id = -int(peer.chat_id)
+        elif isinstance(peer, TLRPC.TL_peerChannel):
+            chat_id = -int(peer.channel_id)
+        else:
+            return None
+        if getattr(message, "out", False):
+            sender_id = my_id
+        else:
+            from_peer = getattr(message, "from_id", None)
+            if isinstance(from_peer, TLRPC.TL_peerUser):
+                sender_id = int(from_peer.user_id)
+            elif isinstance(from_peer, TLRPC.TL_peerChannel):
+                sender_id = int(from_peer.channel_id)
+            elif chat_id > 0:
+                sender_id = chat_id
+            else:
+                sender_id = 0
+        return message.message, chat_id, sender_id, int(getattr(message, "id", 0) or 0), self._reply_id(message)
+
+    @staticmethod
+    def _reply_id(holder):
+        header = getattr(holder, "reply_to", None)
+        value = getattr(header, "reply_to_msg_id", 0) if header is not None else 0
+        return int(value or getattr(holder, "reply_to_msg_id", 0) or 0)
+
+    def _process_update(self, account, update):
+        try:
+            data = self._extract_message(account, update)
+            if not data:
+                return
+            message_text, chat_id, sender_id, message_id, reply_id = data
+            key = (chat_id, message_id)
+            if message_id and key in self._seen:
+                return
+            if len(self._seen) > 2000:
+                self._seen.clear()
+            self._seen.add(key)
+
+            message_text = message_text.strip()
+            parts = message_text.split()
+            if not parts:
+                return
+            commands = self._commands()
+            first_word = parts[0].lower()
+            is_plain_trigger = self.get_setting(KEY_PLAIN_ENABLED, False) and first_word in commands
+            if not message_text.startswith(".") and not is_plain_trigger:
+                return
+            if not self._is_chat_allowed(chat_id):
+                return
+            command = first_word if message_text.startswith(".") else "." + first_word
+
+            if command in (".rpadd", ".rpdel") and self._is_owner(account, sender_id) and len(parts) >= (3 if command == ".rpadd" else 2):
+                self._admin_command(account, chat_id, sender_id, command, parts)
+                return
+            if command == ".rpname" and len(parts) >= 2:
+                self._admin_command(account, chat_id, sender_id, command, parts)
+                return
+
+            rp_command = command[1:]
+            if rp_command not in commands:
+                return
+            if not self.get_setting(KEY_ALLOW_EVERYONE, False) and not self._is_owner(account, sender_id):
+                return
+            user_name = self._display_name(account, sender_id)
+            template = commands[rp_command]
+
+            def send_with_target(target_name):
+                self._send_md(account, chat_id, self._render(template, user_name, target_name))
+
+            if reply_id:
+                self._resolve_reply_target(account, chat_id, reply_id, send_with_target)
+            else:
+                send_with_target(" ".join(parts[1:]) if len(parts) > 1 else SELF_TARGET)
+        except Exception:
+            log("RolePlay update error: " + traceback.format_exc())
+
+    # ------------------------------------------------------------------ helpers
+
+    def _resolve_reply_target(self, account, chat_id, reply_id, done):
+        """Find who wrote message `reply_id` in `chat_id` and pass their name to `done`."""
+        controller = get_messages_controller(account)
+        ids = [TLRPC.TL_inputMessageID(id=int(reply_id))]
+        channel = controller.getChat(-chat_id) if chat_id < 0 else None
+        if isinstance(channel, TLRPC.TL_channel):
+            request = TLRPC.TL_channels_getMessages(
+                channel=TLRPC.TL_inputChannel(channel_id=channel.id, access_hash=channel.access_hash),
+                id=ids,
+            )
+        else:
+            request = TLRPC.TL_messages_getMessages(id=ids)
+
+        def on_response(response, error):
+            target = SELF_TARGET
+            try:
+                if error is None and response is not None:
+                    users = {int(u.id): u for u in (getattr(response, "users", None) or [])}
+                    for user in users.values():
+                        self._names_cache[int(user.id)] = user
+                    for message in getattr(response, "messages", None) or []:
+                        author = self._author_of(account, message, chat_id)
+                        if author:
+                            target = self._display_name(account, author)
+                            break
+                else:
+                    self.log("RolePlay: cannot get the replied message: %s" % getattr(error, "text", error))
+            except Exception:
+                self.log("RolePlay reply target error: " + traceback.format_exc())
+            run_on_ui_thread(lambda: done(target))
+
+        send_request(request, on_response, account=account)
+
+    def _author_of(self, account, message, chat_id):
+        if getattr(message, "out", False):
+            return self._owner_id(account)
+        from_peer = getattr(message, "from_id", None)
+        if isinstance(from_peer, TLRPC.TL_peerUser):
+            return int(from_peer.user_id)
+        if isinstance(from_peer, TLRPC.TL_peerChannel):
+            return int(from_peer.channel_id)
+        return chat_id if chat_id > 0 else 0
+
+    def _render(self, template, user_name, target_name):
+        return self._apply_emoji(template.replace("{user}", user_name).replace("{target}", target_name))
+
+    def _display_name(self, account, user_id):
+        user_id = int(user_id or 0)
+        names = self._names()
+        if str(user_id) in names:
+            return "[%s](tg://user?id=%d)" % (names[str(user_id)], user_id)
+        user = self._names_cache.get(user_id)
+        if user is None:
+            try:
+                user = get_messages_controller(account).getUser(user_id)
+            except Exception:
+                user = None
+        if user is not None:
+            first = getattr(user, "first_name", None)
+            if first:
+                return "[%s](tg://user?id=%d)" % (first, user_id)
+            username = getattr(user, "username", None)
+            if username:
+                return "@" + username
+        return "[id%d](tg://user?id=%d)" % (user_id, user_id)
+
+    def _send_md(self, account, chat_id, text, reply_to=0):
+        parsed = parse_markdown(text)
+        params = {"peer": chat_id, "message": parsed.text}
+        if parsed.entities:
+            params["entities"] = [entity.to_tlrpc_object() for entity in parsed.entities]
+        if reply_to:
+            params["reply_to_msg_id"] = int(reply_to)
+        send_message(params, account=account)
+
+    def _commands(self):
+        try:
+            return json.loads(self.get_setting(KEY_RP_COMMANDS, "{}") or "{}")
+        except ValueError:
+            return {}
+
+    def _names(self):
+        try:
+            return json.loads(self.get_setting(KEY_RP_NAMES, "{}") or "{}")
+        except ValueError:
+            return {}
+
+    def _is_chat_allowed(self, chat_id):
+        if not self.get_setting(KEY_WHITELIST_ENABLED, False):
+            return True
+        allowed = set()
+        for item in str(self.get_setting(KEY_WHITELIST_CHATS, "") or "").split(","):
+            item = item.strip()
+            if item.lstrip("-").isdigit():
+                value = int(item)
+                # Accept Bot API ids like -1001234567890 too.
+                if value < -BOT_API_CHANNEL_SHIFT:
+                    value = -(-value - BOT_API_CHANNEL_SHIFT)
+                allowed.add(value)
+        return int(chat_id) in allowed
+
+    @staticmethod
+    def _owner_id(account):
+        return int(get_user_config(account).getClientUserId())
+
+    def _is_owner(self, account, user_id):
+        return int(user_id or 0) == self._owner_id(account)
+
+    def _apply_emoji(self, text):
+        if not self.get_setting(KEY_EMOJI_ENABLED, False):
+            return text
+        pool = [e for e in str(self.get_setting(KEY_EMOJI_LIST, "") or "").split() if e]
+        if not pool:
+            return text
+        return "%s %s" % (random.choice(pool), text)

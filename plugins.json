@@ -1,0 +1,105 @@
+{
+ "version": 1,
+ "plugins": [
+  {
+   "id": "custom_profile_desktop",
+   "name": "Custom Profile Desktop",
+   "description": "Profile customization for Tsukiko Desktop: banner, avatar shape and frame, name color and glow, message bubbles and player background.",
+   "author": "@tsukikogram",
+   "version": "1.0",
+   "category": "",
+   "requirements": "",
+   "url": "https://raw.githubusercontent.com/L1sovskyy/tsukikodesktop-plugins/main/plugins/custom_profile_desktop.plugin"
+  },
+  {
+   "id": "femboys_music_stats_desktop",
+   "name": "Femboy Music Stats Desktop",
+   "description": "Статистика прослушивания музыки в Telegram: графики с детализацией, статистика трека, текст песни (LRCLIB). Разбор столбцов по трекам, топ исполнителей, команды .music, .lyrics, .track. Версия для Tsukiko Desktop: страницы открываются в браузере.",
+   "author": "@PA3MA3AH",
+   "version": "2.6.1-desktop",
+   "category": "",
+   "requirements": "",
+   "url": "https://raw.githubusercontent.com/L1sovskyy/tsukikodesktop-plugins/main/plugins/femboys_music_stats_desktop.plugin"
+  },
+  {
+   "id": "ndb_desktop",
+   "name": "NavDrawerBackground Desktop",
+   "description": "Custom background for the account card in the side menu of Tsukiko Desktop: picture or GIF/WebP animation, dimming, faded edges.\nIdea and design of the original Android plugin: @ka1Plugins.",
+   "author": "@tsukikogram, idea @ka1Plugins",
+   "version": "1.0",
+   "category": "",
+   "requirements": "",
+   "url": "https://raw.githubusercontent.com/L1sovskyy/tsukikodesktop-plugins/main/plugins/ndb_desktop.plugin"
+  },
+  {
+   "id": "playlist_to_profile_desktop",
+   "name": "Playlist to Profile Desktop",
+   "description": "Добавляет треки из плейлиста (YouTube, Яндекс Музыка, VK, Spotify, SoundCloud...) в музыку профиля. Версия для Tsukiko Desktop.",
+   "author": "@rei_plugins (@optimist_opti)",
+   "version": "1.1-desktop",
+   "category": "",
+   "requirements": "yt-dlp, mutagen, pillow",
+   "url": "https://raw.githubusercontent.com/L1sovskyy/tsukikodesktop-plugins/main/plugins/playlist_to_profile_desktop.plugin"
+  },
+  {
+   "id": "profile_wallpaper_desktop",
+   "name": "Profile Wallpaper Desktop",
+   "description": "Свой фон для страницы вашего профиля в Tsukiko Desktop: фото, размытие, затемнение и прозрачность блоков.\nИдея оригинального плагина для Android: @JIl06uTeJIb_K0TuKoB.",
+   "author": "@tsukikogram, idea @JIl06uTeJIb_K0TuKoB",
+   "version": "1.0.1",
+   "category": "",
+   "requirements": "",
+   "url": "https://raw.githubusercontent.com/L1sovskyy/tsukikodesktop-plugins/main/plugins/profile_wallpaper_desktop.plugin"
+  },
+  {
+   "id": "roleplay_plugin_desktop",
+   "name": "RolePlay Commands Desktop",
+   "description": "Плагин для ролевых команд. Больше информации в настройках. Версия для Tsukiko Desktop.",
+   "author": "@windukk and @shakyyra",
+   "version": "1.4-desktop",
+   "category": "",
+   "requirements": "",
+   "url": "https://raw.githubusercontent.com/L1sovskyy/tsukikodesktop-plugins/main/plugins/roleplay_plugin_desktop.plugin"
+  },
+  {
+   "id": "android_demo",
+   "name": "Демо Android-API",
+   "description": "Пример плагина для Android, работающего на компьютере: пункты в меню, Toast, MessagesController.",
+   "author": "@tsukikogram",
+   "version": "1.0",
+   "category": "tools",
+   "requirements": "",
+   "url": "https://raw.githubusercontent.com/L1sovskyy/tsukikodesktop-plugins/main/plugins/android_demo.plugin"
+  },
+  {
+   "id": "calc_cmd",
+   "name": "Калькулятор",
+   "description": "Считает выражения прямо в сообщении: «.calc 2*21» отправится как «2*21 = 42».",
+   "author": "@test",
+   "version": "1.2",
+   "category": "tools",
+   "requirements": "",
+   "url": "https://raw.githubusercontent.com/L1sovskyy/tsukikodesktop-plugins/main/plugins/calc_cmd.plugin"
+  },
+  {
+   "id": "mute_ls_desktop",
+   "name": "Мут в ЛС Desktop",
+   "description": "Мьютит собеседника в личке: входящие сообщения от него не показываются и удаляются. При желании отправляет уведомления о муте и размьюте. Версия для Tsukiko Desktop.",
+   "author": "@shit_plugins",
+   "version": "1.2-desktop",
+   "category": "",
+   "requirements": "",
+   "url": "https://raw.githubusercontent.com/L1sovskyy/tsukikodesktop-plugins/main/plugins/mute_ls_desktop.plugin"
+  },
+  {
+   "id": "silent_send",
+   "name": "Тихая отправка",
+   "description": "Все ваши сообщения уходят без звука уведомления у получателя.",
+   "author": "@tsukikogram",
+   "version": "1.0",
+   "category": "chats",
+   "requirements": "",
+   "url": "https://raw.githubusercontent.com/L1sovskyy/tsukikodesktop-plugins/main/plugins/silent_send.plugin"
+  }
+ ]
+}
