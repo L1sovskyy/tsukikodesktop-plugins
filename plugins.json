@@ -62,6 +62,16 @@
    "url": "https://raw.githubusercontent.com/L1sovskyy/tsukikodesktop-plugins/main/plugins/roleplay_plugin_desktop.plugin"
   },
   {
+   "id": "wsbypass_desktop",
+   "name": "WS-Bypass Desktop",
+   "description": "Обход блокировок Telegram: локальный MTProto-прокси через WebSocket. Версия для Tsukiko Desktop.",
+   "author": "@Th3Nek1t_projects",
+   "version": "3.1.10-desktop",
+   "category": "",
+   "requirements": "cryptography",
+   "url": "https://raw.githubusercontent.com/L1sovskyy/tsukikodesktop-plugins/main/plugins/wsbypass_desktop.plugin"
+  },
+  {
    "id": "android_demo",
    "name": "Демо Android-API",
    "description": "Пример плагина для Android, работающего на компьютере: пункты в меню, Toast, MessagesController.",

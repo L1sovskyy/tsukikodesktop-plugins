@@ -21,6 +21,7 @@ https://raw.githubusercontent.com/L1sovskyy/tsukikodesktop-plugins/main/plugins.
 | Playlist to Profile Desktop | 1.1-desktop | @rei_plugins (@optimist_opti) |
 | RolePlay Commands Desktop | 1.4-desktop | @windukk and @shakyyra |
 | Мут в ЛС Desktop | 1.2-desktop | @shit_plugins |
+| WS-Bypass Desktop | 3.1.10-desktop | @Th3Nek1t_projects |
 | Калькулятор | 1.2 | @test |
 | Тихая отправка | 1.0 | @tsukikogram |
 | Демо Android-API | 1.0 | @tsukikogram |
